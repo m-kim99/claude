@@ -174,6 +174,13 @@ export default function ChatPage() {
     loadHistory();
   }, [loadHistory]);
 
+  useEffect(() => {
+    const saved = localStorage.getItem('contextMode');
+    if (saved === '20turns' || saved === '40turns' || saved === '128k') {
+      setContextMode(saved);
+    }
+  }, []);
+
   useLayoutEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -282,7 +289,11 @@ export default function ChatPage() {
         <div className="flex items-center gap-3">
           <select
             value={contextMode}
-            onChange={(e) => setContextMode(e.target.value as ContextMode)}
+            onChange={(e) => {
+              const v = e.target.value as ContextMode;
+              setContextMode(v);
+              localStorage.setItem('contextMode', v);
+            }}
             className="text-xs bg-white rounded-lg px-2 py-1.5 text-gray-600 focus:outline-none cursor-pointer appearance-none"
             style={{ border: '1.5px solid #EEEDEC' }}
           >
