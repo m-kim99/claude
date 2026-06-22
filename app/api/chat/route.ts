@@ -68,7 +68,11 @@ export async function POST(req: NextRequest) {
     });
     const dateInfo = `현재 날짜/시간: ${now}`;
     const basePrompt = process.env.SYSTEM_PROMPT || '';
-    const systemPrompt = basePrompt ? `${basePrompt}\n\n${dateInfo}` : dateInfo;
+
+    const systemBlocks: Anthropic.TextBlockParam[] = basePrompt
+      ? [{ type: 'text', text: basePrompt, cache_control: { type: 'ephemeral' } }]
+      : [];
+    const systemParam = systemBlocks.length ? systemBlocks : undefined;
 
     const MODEL = 'claude-sonnet-4-5-20250929';
     const MAX_INPUT_TOKENS = 180000;
@@ -76,7 +80,7 @@ export async function POST(req: NextRequest) {
 
     if (contextMode === '128k' && contextMessages.length > 80) {
       let tokens = (await anthropic.messages.countTokens({
-        model: MODEL, system: systemPrompt, messages: finalMessages,
+        model: MODEL, system: systemParam, messages: finalMessages,
       })).input_tokens;
 
       while (tokens > MAX_INPUT_TOKENS && finalMessages.length > 2) {
@@ -87,16 +91,38 @@ export async function POST(req: NextRequest) {
           finalMessages = finalMessages.slice(1);
         }
         tokens = (await anthropic.messages.countTokens({
-          model: MODEL, system: systemPrompt, messages: finalMessages,
+          model: MODEL, system: systemParam, messages: finalMessages,
         })).input_tokens;
       }
     }
 
-    const response = await anthropic.messages.create({
+    const lastIndex = finalMessages.length - 1;
+    const cacheIndex = finalMessages.length - 2;
+    const apiMessages: Anthropic.MessageParam[] = finalMessages.map((m, i) => {
+      const text = i === lastIndex ? `${m.content}\n\n${dateInfo}` : m.content;
+      if (i === cacheIndex) {
+        return {
+          role: m.role,
+          content: [{ type: 'text', text, cache_control: { type: 'ephemeral' } }],
+        };
+      }
+      return { role: m.role, content: text };
+    });
+
+    const stream = anthropic.messages.stream({
       model: MODEL,
-      max_tokens: 8192,
-      system: systemPrompt,
-      messages: finalMessages,
+      max_tokens: 64000,
+      system: systemParam,
+      messages: apiMessages,
+    });
+    const response = await stream.finalMessage();
+
+    const usage = response.usage;
+    console.log('[prompt-cache]', {
+      cacheWrite: usage.cache_creation_input_tokens ?? 0,
+      cacheRead: usage.cache_read_input_tokens ?? 0,
+      input: usage.input_tokens,
+      output: usage.output_tokens,
     });
 
     const assistantContent =
