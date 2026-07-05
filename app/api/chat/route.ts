@@ -218,23 +218,54 @@ export async function POST(req: NextRequest) {
     const MAX_INPUT_TOKENS = 180000;
     let finalMessages = contextMessages;
 
-    if (contextMode === '128k' && contextMessages.length > 80) {
-      const countTokens = () =>
-        anthropic.messages.countTokens({
-          model: MODEL,
-          system: systemParam,
-          messages: finalMessages.map((m) => ({ role: m.role, content: m.blocks })),
-        });
-      let tokens = (await countTokens()).input_tokens;
-
-      while (tokens > MAX_INPUT_TOKENS && finalMessages.length > 2) {
-        const ratio = MAX_INPUT_TOKENS / tokens;
-        const dropCount = Math.max(2, Math.ceil(finalMessages.length * (1 - ratio)) + 4);
-        finalMessages = finalMessages.slice(dropCount);
-        if (finalMessages[0]?.role !== 'user') {
-          finalMessages = finalMessages.slice(1);
+    // 보수적 토큰 추정 (한글 1자 ≈ 최대 1.5토큰, 이미지 1장 ≈ 1600토큰)
+    const estimateTokens = (msgs: BlockMessage[]) => {
+      let est = basePrompt.length * 1.5;
+      for (const m of msgs) {
+        for (const b of m.blocks) {
+          est += b.type === 'text' ? b.text.length * 1.5 : 1600;
         }
-        tokens = (await countTokens()).input_tokens;
+      }
+      return est;
+    };
+
+    // 앞쪽(오래된) 메시지 제거, 첫 메시지가 user가 되도록 보정
+    const dropOldest = (msgs: BlockMessage[], dropCount: number): BlockMessage[] => {
+      let next = msgs.slice(Math.min(dropCount, msgs.length - 1));
+      if (next.length > 1 && next[0]?.role !== 'user') {
+        next = next.slice(1);
+      }
+      return next;
+    };
+
+    // 모든 컨텍스트 모드에서: 추정치가 임계치를 넘으면 실제 토큰을 세서 초과분 제거
+    if (estimateTokens(finalMessages) > MAX_INPUT_TOKENS * 0.7) {
+      try {
+        const countTokens = () =>
+          anthropic.messages.countTokens({
+            model: MODEL,
+            system: systemParam,
+            messages: finalMessages.map((m) => ({ role: m.role, content: m.blocks })),
+          });
+        let tokens = (await countTokens()).input_tokens;
+
+        while (tokens > MAX_INPUT_TOKENS && finalMessages.length > 2) {
+          const ratio = MAX_INPUT_TOKENS / tokens;
+          finalMessages = dropOldest(
+            finalMessages,
+            Math.max(2, Math.ceil(finalMessages.length * (1 - ratio)) + 4)
+          );
+          tokens = (await countTokens()).input_tokens;
+        }
+      } catch (countError) {
+        // countTokens 실패(예: URL 이미지 페치 불가) → 추정치 기반으로 트리밍
+        console.error('[count-tokens] 실패, 추정치 기반 트리밍:', countError);
+        while (estimateTokens(finalMessages) > MAX_INPUT_TOKENS && finalMessages.length > 2) {
+          finalMessages = dropOldest(
+            finalMessages,
+            Math.max(2, Math.ceil(finalMessages.length * 0.3))
+          );
+        }
       }
     }
 
@@ -250,18 +281,46 @@ export async function POST(req: NextRequest) {
         })
         .finalMessage();
 
-    const hasUrlImages = finalMessages.some((m) =>
-      m.blocks.some((b) => b.type === 'image' && b.source.type === 'url')
-    );
+    // 단계적 복구 재시도:
+    //  1) prompt too long → 오래된 메시지 30% 제거 후 재시도
+    //  2) 히스토리 URL 이미지 페치 실패 → 이미지 제외 후 재시도
+    let response: Anthropic.Message | null = null;
+    let attemptMessages = finalMessages;
+    let urlImagesStripped = false;
 
-    let response: Anthropic.Message;
-    try {
-      response = await runClaude(toApiMessages(finalMessages, dateInfo, cacheControl));
-    } catch (err) {
-      // 히스토리 URL 이미지 페치 실패 등 → 이미지 제외 후 1회 재시도
-      if (!hasUrlImages) throw err;
-      console.error('[claude-retry] 히스토리 이미지 제외 후 재시도:', err);
-      response = await runClaude(toApiMessages(stripUrlImages(finalMessages), dateInfo, cacheControl));
+    for (let attempt = 0; attempt < 6 && !response; attempt++) {
+      try {
+        response = await runClaude(toApiMessages(attemptMessages, dateInfo, cacheControl));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/prompt is too long/i.test(msg)) {
+          if (attemptMessages.length <= 2) {
+            throw new Error(
+              '메시지(첨부 포함)가 너무 깁니다. 내용을 줄이거나 이미지 수를 줄여주세요.'
+            );
+          }
+          console.error('[claude-retry] 컨텍스트 초과 → 오래된 메시지 제거 후 재시도');
+          attemptMessages = dropOldest(
+            attemptMessages,
+            Math.max(2, Math.ceil(attemptMessages.length * 0.3))
+          );
+          continue;
+        }
+        const hasUrlImages = attemptMessages.some((m) =>
+          m.blocks.some((b) => b.type === 'image' && b.source.type === 'url')
+        );
+        if (!urlImagesStripped && hasUrlImages) {
+          urlImagesStripped = true;
+          console.error('[claude-retry] 히스토리 이미지 제외 후 재시도:', err);
+          attemptMessages = stripUrlImages(attemptMessages);
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    if (!response) {
+      throw new Error('컨텍스트가 너무 커서 응답을 생성하지 못했습니다. 컨텍스트 모드를 낮춰주세요.');
     }
 
     const usage = response.usage;
