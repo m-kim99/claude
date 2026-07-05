@@ -8,6 +8,7 @@ interface Message {
   id: number | string;
   role: 'user' | 'assistant';
   content: string;
+  images?: string[] | null;
   created_at: string;
 }
 
@@ -42,9 +43,64 @@ const mdComponents = {
 
 const remarkPlugins = [remarkGfm];
 
+// ─── 이미지 첨부 설정/유틸 ──────────────────────────────────────
+const MAX_IMAGES = 4;
+const MAX_FILE_MB = 20;
+const MAX_IMAGE_DIM = 1568; // Claude 권장 최대 해상도
+
+interface OutgoingImage {
+  dataUrl: string;
+  data: string;
+  mediaType: string;
+}
+
+function loadImageFromFile(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('이미지를 읽을 수 없습니다'));
+    };
+    img.src = url;
+  });
+}
+
+// 브라우저에서 리사이즈 + JPEG 변환 → 업로드 용량/토큰 최적화
+async function fileToJpegDataUrl(file: File): Promise<string> {
+  const img = await loadImageFromFile(file);
+  try {
+    const scale = Math.min(1, MAX_IMAGE_DIM / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * scale));
+    const h = Math.max(1, Math.round(img.naturalHeight * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('canvas context 생성 실패');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL('image/jpeg', 0.85);
+  } finally {
+    URL.revokeObjectURL(img.src);
+  }
+}
+
 // ─── Memoized Message Component (개별 메시지 리렌더 방지) ────────
 const MessageItem = memo(function MessageItem({ msg }: { msg: Message }) {
   const [copied, setCopied] = useState(false);
+  const [lightbox, setLightbox] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!lightbox) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLightbox(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [lightbox]);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(msg.content);
@@ -72,10 +128,25 @@ const MessageItem = memo(function MessageItem({ msg }: { msg: Message }) {
 
       {msg.role === 'user' ? (
         <div
-          className="max-w-[78%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words rounded-br-sm"
+          className="max-w-[78%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed break-words rounded-br-sm"
           style={{ backgroundColor: '#F0EBE5', color: '#2d2a26' }}
         >
-          {msg.content}
+          {msg.images && msg.images.length > 0 && (
+            <div className={`flex flex-wrap gap-2 ${msg.content ? 'mb-2' : ''}`}>
+              {msg.images.map((url, i) => (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={i}
+                  src={url}
+                  alt={`첨부 이미지 ${i + 1}`}
+                  loading="lazy"
+                  onClick={() => setLightbox(url)}
+                  className="max-h-48 max-w-full rounded-lg cursor-zoom-in"
+                />
+              ))}
+            </div>
+          )}
+          {msg.content && <div className="whitespace-pre-wrap">{msg.content}</div>}
         </div>
       ) : (
         <div className="max-w-[85%] text-sm leading-relaxed text-gray-800">
@@ -94,14 +165,30 @@ const MessageItem = memo(function MessageItem({ msg }: { msg: Message }) {
           {copyIcon}
         </button>
       )}
+
+      {lightbox && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 cursor-zoom-out"
+          style={{ backgroundColor: 'rgba(0,0,0,0.8)' }}
+          onClick={() => setLightbox(null)}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={lightbox} alt="첨부 이미지 원본" className="max-w-full max-h-full rounded-lg object-contain" />
+        </div>
+      )}
     </div>
   );
 });
 
 // ─── Isolated Input Area (입력 state가 메시지 목록 리렌더 유발 방지) ──
-function InputArea({ loading, onSend }: { loading: boolean; onSend: (text: string) => void }) {
+function InputArea({ loading, onSend }: { loading: boolean; onSend: (text: string, images: OutgoingImage[]) => void }) {
   const [input, setInput] = useState('');
+  const [pending, setPending] = useState<{ id: string; dataUrl: string }[]>([]);
+  const [attachError, setAttachError] = useState('');
+  const [processing, setProcessing] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -111,33 +198,171 @@ function InputArea({ loading, onSend }: { loading: boolean; onSend: (text: strin
     }
   }, [input]);
 
+  const addFiles = useCallback(
+    async (files: File[]) => {
+      setAttachError('');
+      const imageFiles = files.filter((f) => f.type.startsWith('image/'));
+      if (imageFiles.length === 0) {
+        setAttachError('이미지 파일만 첨부할 수 있습니다.');
+        return;
+      }
+      const room = MAX_IMAGES - pending.length;
+      if (room <= 0) {
+        setAttachError(`이미지는 최대 ${MAX_IMAGES}장까지 첨부할 수 있습니다.`);
+        return;
+      }
+      if (imageFiles.length > room) {
+        setAttachError(`이미지는 최대 ${MAX_IMAGES}장까지 첨부할 수 있습니다.`);
+      }
+      const selected = imageFiles.slice(0, room);
+      if (selected.some((f) => f.size > MAX_FILE_MB * 1024 * 1024)) {
+        setAttachError(`${MAX_FILE_MB}MB 이하의 이미지만 첨부할 수 있습니다.`);
+        return;
+      }
+      setProcessing(true);
+      try {
+        const converted = await Promise.all(
+          selected.map(async (f, i) => ({
+            id: `${Date.now()}-${i}-${Math.random().toString(36).slice(2)}`,
+            dataUrl: await fileToJpegDataUrl(f),
+          }))
+        );
+        setPending((prev) => [...prev, ...converted].slice(0, MAX_IMAGES));
+      } catch {
+        setAttachError('이미지 처리에 실패했습니다. 다른 이미지를 사용해주세요.');
+      } finally {
+        setProcessing(false);
+      }
+    },
+    [pending.length]
+  );
+
   const handleSend = () => {
-    if (!input.trim() || loading) return;
-    onSend(input.trim());
+    const text = input.trim();
+    if ((!text && pending.length === 0) || loading || processing) return;
+    const images: OutgoingImage[] = pending.map((p) => {
+      const comma = p.dataUrl.indexOf(',');
+      const meta = p.dataUrl.slice(0, comma);
+      return {
+        dataUrl: p.dataUrl,
+        data: p.dataUrl.slice(comma + 1),
+        mediaType: meta.slice(5, meta.indexOf(';')),
+      };
+    });
+    onSend(text, images);
     setInput('');
+    setPending([]);
+    setAttachError('');
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.clipboardData.items)
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((f): f is File => f !== null);
+    if (files.length > 0) {
+      e.preventDefault();
+      addFiles(files);
+    }
   };
 
   return (
-    <div className="px-4 py-3" style={{ backgroundColor: '#FCFAF8' }}>
-      <div className="max-w-3xl mx-auto flex gap-2 items-end">
-        <textarea
-          ref={textareaRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="메시지 입력..."
-          rows={1}
-          disabled={loading}
-          className="flex-1 bg-white rounded-xl px-3 py-2.5 text-sm resize-none focus:outline-none disabled:bg-gray-50 transition-all overflow-hidden"
-          style={{ border: '1.5px solid #EEEDEC', minHeight: '42px', maxHeight: '160px', fontSize: '16px' }}
-        />
-        <button
-          onClick={handleSend}
-          disabled={loading || !input.trim()}
-          className="rounded-xl px-4 py-2.5 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0 text-white"
-          style={{ backgroundColor: '#b8a68e' }}
-        >
-          전송
-        </button>
+    <div
+      className="px-4 py-3"
+      style={{ backgroundColor: '#FCFAF8' }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragging(false);
+        if (e.dataTransfer.files.length > 0) addFiles(Array.from(e.dataTransfer.files));
+      }}
+    >
+      <div className="max-w-3xl mx-auto">
+        {attachError && <p className="text-xs text-red-400 mb-1.5 px-1">{attachError}</p>}
+        {(pending.length > 0 || processing) && (
+          <div className="flex flex-wrap gap-2 mb-2">
+            {pending.map((p) => (
+              <div key={p.id} className="relative">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={p.dataUrl}
+                  alt="첨부 이미지 미리보기"
+                  className="w-16 h-16 object-cover rounded-lg"
+                  style={{ border: '1.5px solid #EEEDEC' }}
+                />
+                <button
+                  onClick={() => setPending((prev) => prev.filter((x) => x.id !== p.id))}
+                  className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-gray-600 hover:bg-gray-800 text-white text-xs leading-none flex items-center justify-center"
+                  title="이미지 제거"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            {processing && (
+              <div
+                className="w-16 h-16 rounded-lg flex items-center justify-center"
+                style={{ border: '1.5px dashed #d6d3ce' }}
+              >
+                <span className="text-xs text-gray-400 animate-pulse">···</span>
+              </div>
+            )}
+          </div>
+        )}
+        <div className="flex gap-2 items-end">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files && e.target.files.length > 0) addFiles(Array.from(e.target.files));
+              e.target.value = '';
+            }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={loading || processing}
+            className="rounded-xl w-[42px] h-[42px] flex items-center justify-center bg-white text-gray-400 hover:text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+            style={{ border: '1.5px solid #EEEDEC' }}
+            title="이미지 첨부"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+              <circle cx="8.5" cy="8.5" r="1.5" />
+              <polyline points="21 15 16 10 5 21" />
+            </svg>
+          </button>
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onPaste={handlePaste}
+            placeholder={dragging ? '이미지를 여기에 놓으세요' : '메시지 입력...'}
+            rows={1}
+            disabled={loading}
+            className="flex-1 bg-white rounded-xl px-3 py-2.5 text-sm resize-none focus:outline-none disabled:bg-gray-50 transition-all overflow-hidden"
+            style={{
+              border: dragging ? '1.5px dashed #b8a68e' : '1.5px solid #EEEDEC',
+              minHeight: '42px',
+              maxHeight: '160px',
+              fontSize: '16px',
+            }}
+          />
+          <button
+            onClick={handleSend}
+            disabled={loading || processing || (!input.trim() && pending.length === 0)}
+            className="rounded-xl px-4 py-2.5 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0 text-white"
+            style={{ backgroundColor: '#b8a68e' }}
+          >
+            전송
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -235,7 +460,7 @@ export default function ChatPage() {
     }
   }, [loadingMore, hasMore, loadOlderMessages]);
 
-  const sendMessage = async (userContent: string) => {
+  const sendMessage = async (userContent: string, images: OutgoingImage[] = []) => {
     if (loading) return;
     setError('');
     setLoading(true);
@@ -244,14 +469,24 @@ export default function ChatPage() {
     const tempId = `temp-${Date.now()}`;
     setMessages((prev) => [
       ...prev,
-      { id: tempId, role: 'user', content: userContent, created_at: new Date().toISOString() },
+      {
+        id: tempId,
+        role: 'user',
+        content: userContent,
+        images: images.length > 0 ? images.map((img) => img.dataUrl) : null,
+        created_at: new Date().toISOString(),
+      },
     ]);
 
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: userContent, contextMode }),
+        body: JSON.stringify({
+          content: userContent,
+          contextMode,
+          images: images.map(({ data, mediaType }) => ({ data, mediaType })),
+        }),
       });
       const data = await res.json();
 
@@ -268,7 +503,12 @@ export default function ChatPage() {
         },
       ]);
 
-      await loadHistory();
+      if (data.warning) {
+        // 응답은 생성됐지만 DB 저장 실패 → 화면의 임시 메시지 유지
+        setError(data.warning);
+      } else {
+        await loadHistory();
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : '알 수 없는 오류';
       setError(msg);

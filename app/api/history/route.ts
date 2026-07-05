@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
 
     let query = supabase
       .from('messages')
-      .select('id, role, content, created_at')
+      .select('id, role, content, images, created_at')
       .order('id', { ascending: false })
       .limit(limit + 1);
 
@@ -22,7 +22,26 @@ export async function GET(req: NextRequest) {
       query = query.lt('id', parseInt(before));
     }
 
-    const { data, error } = await query;
+    const result = await query;
+    let data: { id: number; role: string; content: string; images?: unknown; created_at: string }[] | null =
+      result.data;
+    let error = result.error;
+
+    // images 컬럼이 아직 없는 DB(미마이그레이션) 폴백
+    if (error && /images/i.test(error.message)) {
+      let fallback = supabase
+        .from('messages')
+        .select('id, role, content, created_at')
+        .order('id', { ascending: false })
+        .limit(limit + 1);
+      if (before) {
+        fallback = fallback.lt('id', parseInt(before));
+      }
+      const fallbackResult = await fallback;
+      data = fallbackResult.data;
+      error = fallbackResult.error;
+    }
+
     if (error) throw error;
 
     const hasMore = (data || []).length > limit;

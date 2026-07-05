@@ -13,6 +13,7 @@ CREATE TABLE messages (
   id BIGSERIAL PRIMARY KEY,
   role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant')),
   content TEXT NOT NULL,
+  images JSONB,           -- 첨부 이미지 URL 배열 (없으면 NULL)
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -22,6 +23,21 @@ ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow all for service role" ON messages
   FOR ALL USING (true);
 ```
+
+### 기존 테이블이 이미 있는 경우 (이미지 기능 마이그레이션)
+
+```sql
+-- 1) 메시지에 이미지 URL을 저장할 컬럼 추가
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS images JSONB;
+
+-- 2) 이미지 파일 저장용 공개 버킷 생성
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('chat-images', 'chat-images', true)
+ON CONFLICT (id) DO UPDATE SET public = true;
+```
+
+> 버킷은 대시보드(Storage → New bucket → 이름 `chat-images`, **Public** 체크)로 만들어도 됩니다.
+> 서버는 service role로 업로드하므로 별도 Storage 정책은 필요 없습니다.
 
 ---
 
@@ -88,9 +104,9 @@ Vercel 대시보드 → Settings → Environment Variables에서
 
 ```
 app/
-├── page.tsx              # 채팅 UI
+├── page.tsx              # 채팅 UI (이미지 첨부: 버튼/붙여넣기/드래그앤드롭)
 └── api/
-    ├── chat/route.ts     # 메시지 전송 (최근 20개 컨텍스트)
+    ├── chat/route.ts     # 메시지 전송 (이미지 → Storage 업로드 + Claude 비전)
     ├── history/route.ts  # 전체 히스토리 조회
     └── seed/route.ts     # 기존 대화 시드 (1회)
 lib/
