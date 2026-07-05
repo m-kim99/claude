@@ -69,10 +69,12 @@ export async function POST(req: NextRequest) {
     const dateInfo = `현재 날짜/시간: ${now}`;
     const basePrompt = process.env.SYSTEM_PROMPT || '';
 
+    const cacheControl = { type: 'ephemeral', ttl: '1h' } as Anthropic.CacheControlEphemeral;
     const systemBlocks: Anthropic.TextBlockParam[] = basePrompt
-      ? [{ type: 'text', text: basePrompt, cache_control: { type: 'ephemeral' } }]
+      ? [{ type: 'text', text: basePrompt, cache_control: cacheControl }]
       : [];
     const systemParam = systemBlocks.length ? systemBlocks : undefined;
+    const countSystem = basePrompt || undefined;
 
     const MODEL = 'claude-sonnet-4-5-20250929';
     const MAX_INPUT_TOKENS = 180000;
@@ -80,7 +82,7 @@ export async function POST(req: NextRequest) {
 
     if (contextMode === '128k' && contextMessages.length > 80) {
       let tokens = (await anthropic.messages.countTokens({
-        model: MODEL, system: systemParam, messages: finalMessages,
+        model: MODEL, system: countSystem, messages: finalMessages,
       })).input_tokens;
 
       while (tokens > MAX_INPUT_TOKENS && finalMessages.length > 2) {
@@ -103,7 +105,7 @@ export async function POST(req: NextRequest) {
       if (i === cacheIndex) {
         return {
           role: m.role,
-          content: [{ type: 'text', text, cache_control: { type: 'ephemeral' } }],
+          content: [{ type: 'text', text, cache_control: cacheControl }],
         };
       }
       return { role: m.role, content: text };
@@ -114,6 +116,8 @@ export async function POST(req: NextRequest) {
       max_tokens: 64000,
       system: systemParam,
       messages: apiMessages,
+    }, {
+      headers: { 'anthropic-beta': 'extended-cache-ttl-2025-04-11' },
     });
     const response = await stream.finalMessage();
 
