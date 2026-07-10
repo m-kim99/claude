@@ -378,7 +378,9 @@ export default function ChatPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
+  const stickToBottomRef = useRef(true);
   const prevScrollHeightRef = useRef<number | null>(null);
   const isInitializedRef = useRef(false);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
@@ -413,6 +415,7 @@ export default function ChatPage() {
     if (prevScrollHeightRef.current !== null) {
       container.scrollTop = container.scrollHeight - prevScrollHeightRef.current;
       prevScrollHeightRef.current = null;
+      stickToBottomRef.current = false;
     } else if (autoScrollRef.current) {
       if (container.scrollHeight > container.clientHeight) {
         container.scrollTop = container.scrollHeight;
@@ -421,8 +424,25 @@ export default function ChatPage() {
         }
       }
       autoScrollRef.current = false;
+      stickToBottomRef.current = true;
     }
   }, [messages]);
+
+  // 이미지 로드 등으로 콘텐츠 높이가 늘어나도 바닥에 붙은 상태 유지
+  const hasMessages = messages.length > 0;
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    const content = contentRef.current;
+    if (!container || !content) return;
+
+    const observer = new ResizeObserver(() => {
+      if (stickToBottomRef.current) {
+        container.scrollTop = container.scrollHeight;
+      }
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [hasMessages]);
 
   const loadOlderMessages = useCallback(async () => {
     if (loadingMore || !hasMore || messages.length === 0) return;
@@ -453,6 +473,7 @@ export default function ChatPage() {
 
     const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     setShowScrollBtn(distFromBottom > 200);
+    stickToBottomRef.current = distFromBottom < 40;
 
     if (!isInitializedRef.current || loadingMore || !hasMore) return;
     if (container.scrollTop < 80) {
@@ -553,7 +574,7 @@ export default function ChatPage() {
             <p className="text-sm">대화를 시작하세요</p>
           </div>
         ) : (
-          <div className="max-w-3xl mx-auto space-y-5">
+          <div ref={contentRef} className="max-w-3xl mx-auto space-y-5">
             {loadingMore && (
               <div className="flex justify-center py-2">
                 <span className="text-xs text-gray-400">불러오는 중...</span>
