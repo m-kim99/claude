@@ -428,20 +428,31 @@ export default function ChatPage() {
     }
   }, [messages]);
 
-  // 이미지 로드 등으로 콘텐츠 높이가 늘어나도 바닥에 붙은 상태 유지
+  // 이미지 로드(콘텐츠 높이 증가)뿐 아니라 컨테이너 크기 변화
+  // (모바일 주소창/키보드/창 크기)에서도 바닥에 붙은 상태 유지
   const hasMessages = messages.length > 0;
   useEffect(() => {
     const container = scrollContainerRef.current;
     const content = contentRef.current;
     if (!container || !content) return;
 
-    const observer = new ResizeObserver(() => {
+    const pinToBottom = () => {
       if (stickToBottomRef.current) {
         container.scrollTop = container.scrollHeight;
       }
-    });
+    };
+
+    const observer = new ResizeObserver(pinToBottom);
     observer.observe(content);
-    return () => observer.disconnect();
+    observer.observe(container);
+
+    // iOS 등에서 레이아웃 변화 없이 비주얼 뷰포트만 변하는 경우 대응
+    window.visualViewport?.addEventListener('resize', pinToBottom);
+
+    return () => {
+      observer.disconnect();
+      window.visualViewport?.removeEventListener('resize', pinToBottom);
+    };
   }, [hasMessages]);
 
   const loadOlderMessages = useCallback(async () => {
@@ -540,7 +551,10 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex flex-col h-screen overflow-x-hidden" style={{ backgroundColor: '#FCFAF8' }}>
+    <div
+      className="flex flex-col h-screen overflow-x-hidden"
+      style={{ height: '100dvh', backgroundColor: '#FCFAF8' }}
+    >
       {/* Header */}
       <div className="px-4 py-3 flex items-center justify-between" style={{ backgroundColor: '#FCFAF8' }}>
         <div>
