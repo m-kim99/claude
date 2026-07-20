@@ -141,7 +141,7 @@ const MessageItem = memo(function MessageItem({ msg }: { msg: Message }) {
                   alt={`첨부 이미지 ${i + 1}`}
                   loading="lazy"
                   onClick={() => setLightbox(url)}
-                  className="max-h-48 max-w-full rounded-lg cursor-zoom-in"
+                  className="w-40 h-48 object-cover rounded-lg cursor-zoom-in"
                 />
               ))}
             </div>
@@ -383,7 +383,21 @@ export default function ChatPage() {
   const stickToBottomRef = useRef(true);
   const prevScrollHeightRef = useRef<number | null>(null);
   const isInitializedRef = useRef(false);
+  const suppressScrollEventRef = useRef(false);
+  const loadingMoreRef = useRef(false);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
+
+  // 코드가 일으킨 스크롤은 플래그로 표시해서 handleScroll이
+  // 사용자 스크롤로 오인(stickToBottom 해제/과거 로드 발동)하지 않게 함
+  const pinToBottom = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const target = container.scrollHeight - container.clientHeight;
+    if (Math.abs(container.scrollTop - target) > 1) {
+      suppressScrollEventRef.current = true;
+      container.scrollTop = container.scrollHeight;
+    }
+  }, []);
 
   const loadHistory = useCallback(async () => {
     try {
@@ -413,12 +427,16 @@ export default function ChatPage() {
     if (!container) return;
 
     if (prevScrollHeightRef.current !== null) {
-      container.scrollTop = container.scrollHeight - prevScrollHeightRef.current;
+      const target = container.scrollHeight - prevScrollHeightRef.current;
+      if (Math.abs(container.scrollTop - target) > 1) {
+        suppressScrollEventRef.current = true;
+        container.scrollTop = target;
+      }
       prevScrollHeightRef.current = null;
       stickToBottomRef.current = false;
     } else if (autoScrollRef.current) {
       if (container.scrollHeight > container.clientHeight) {
-        container.scrollTop = container.scrollHeight;
+        pinToBottom();
         if (!isInitializedRef.current) {
           isInitializedRef.current = true;
         }
@@ -426,7 +444,7 @@ export default function ChatPage() {
       autoScrollRef.current = false;
       stickToBottomRef.current = true;
     }
-  }, [messages]);
+  }, [messages, pinToBottom]);
 
   // 이미지 로드(콘텐츠 높이 증가)뿐 아니라 컨테이너 크기 변화
   // (모바일 주소창/키보드/창 크기)에서도 바닥에 붙은 상태 유지
@@ -436,27 +454,28 @@ export default function ChatPage() {
     const content = contentRef.current;
     if (!container || !content) return;
 
-    const pinToBottom = () => {
+    const onResize = () => {
       if (stickToBottomRef.current) {
-        container.scrollTop = container.scrollHeight;
+        pinToBottom();
       }
     };
 
-    const observer = new ResizeObserver(pinToBottom);
+    const observer = new ResizeObserver(onResize);
     observer.observe(content);
     observer.observe(container);
 
     // iOS 등에서 레이아웃 변화 없이 비주얼 뷰포트만 변하는 경우 대응
-    window.visualViewport?.addEventListener('resize', pinToBottom);
+    window.visualViewport?.addEventListener('resize', onResize);
 
     return () => {
       observer.disconnect();
-      window.visualViewport?.removeEventListener('resize', pinToBottom);
+      window.visualViewport?.removeEventListener('resize', onResize);
     };
-  }, [hasMessages]);
+  }, [hasMessages, pinToBottom]);
 
   const loadOlderMessages = useCallback(async () => {
-    if (loadingMore || !hasMore || messages.length === 0) return;
+    if (loadingMoreRef.current || !hasMore || messages.length === 0) return;
+    loadingMoreRef.current = true;
     setLoadingMore(true);
     autoScrollRef.current = false;
     const oldestId = messages[0].id;
@@ -474,9 +493,10 @@ export default function ChatPage() {
     } catch {
       prevScrollHeightRef.current = null;
     } finally {
+      loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [loadingMore, hasMore, messages]);
+  }, [hasMore, messages]);
 
   const handleScroll = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -484,13 +504,20 @@ export default function ChatPage() {
 
     const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     setShowScrollBtn(distFromBottom > 200);
+
+    // 코드가 일으킨 스크롤: stickToBottom 판정/과거 로드 트리거 모두 건너뜀
+    if (suppressScrollEventRef.current) {
+      suppressScrollEventRef.current = false;
+      return;
+    }
+
     stickToBottomRef.current = distFromBottom < 40;
 
-    if (!isInitializedRef.current || loadingMore || !hasMore) return;
+    if (!isInitializedRef.current || loadingMoreRef.current || !hasMore) return;
     if (container.scrollTop < 80) {
       loadOlderMessages();
     }
-  }, [loadingMore, hasMore, loadOlderMessages]);
+  }, [hasMore, loadOlderMessages]);
 
   const sendMessage = async (userContent: string, images: OutgoingImage[] = []) => {
     if (loading) return;
@@ -631,10 +658,8 @@ export default function ChatPage() {
         <div className="flex justify-center pb-1">
           <button
             onClick={() => {
-              const container = scrollContainerRef.current;
-              if (container) {
-                container.scrollTop = container.scrollHeight;
-              }
+              stickToBottomRef.current = true;
+              pinToBottom();
             }}
             className="rounded-full w-8 h-8 flex items-center justify-center bg-white shadow-md border border-gray-200 text-gray-500 hover:text-gray-700 hover:shadow-lg transition-all"
           >
