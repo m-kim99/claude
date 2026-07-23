@@ -12,11 +12,11 @@ interface Message {
   created_at: string;
 }
 
-type ContextMode = '20turns' | '40turns' | '128k';
+type ContextMode = '20turns' | '40turns' | '200k';
 const CONTEXT_OPTIONS: { value: ContextMode; label: string }[] = [
   { value: '20turns', label: '최근 20턴' },
   { value: '40turns', label: '최근 40턴' },
-  { value: '128k', label: '128k 전체' },
+  { value: '200k', label: '200k 전체' },
 ];
 
 // ─── Markdown components (모듈 레벨 상수 — 매 렌더마다 재생성 방지) ───
@@ -417,7 +417,9 @@ export default function ChatPage() {
 
   useEffect(() => {
     const saved = localStorage.getItem('contextMode');
-    if (saved === '20turns' || saved === '40turns' || saved === '128k') {
+    if (saved === '128k') {
+      setContextMode('200k');
+    } else if (saved === '20turns' || saved === '40turns' || saved === '200k') {
       setContextMode(saved);
     }
   }, []);

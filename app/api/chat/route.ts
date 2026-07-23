@@ -120,11 +120,11 @@ export async function POST(req: NextRequest) {
     }
 
     // 컨텍스트 모드에 따라 가져올 메시지 수 결정
-    // 20turns = 40 messages (-1 for current), 40turns = 80, 128k = all
+    // 20turns = 40 messages (-1 for current), 40turns = 80, 200k = all
     const limitMap: Record<string, number> = {
       '20turns': 39,
       '40turns': 79,
-      '128k': 10000,
+      '200k': 10000,
     };
     const msgLimit = limitMap[contextMode] ?? 39;
 
